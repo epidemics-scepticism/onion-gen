@@ -1,2 +1,3 @@
 # onion-gen
-Toy implementation for generating vanity onions
+## Please don't actually use this.
+### Toy implementation for generating vanity onions
