@@ -140,7 +140,7 @@ if __name__ == '__main__':
         help = "Number of primes to generate")
     parser.add_argument("--word-lists", "-w", type = str, default = "words,sequences",
         help = "Comma delimited list of wordlists")
-    parser.add_argument("--full", "-f", type = bool, default = False,
+    parser.add_argument("--full", "-f", action = "store_true",
         help = "Only match full, not just prefix")
     args = parser.parse_args()
     t = threading.Thread(target = Generator, args = (args.count, args.word_lists.split(','), die, True, args.full))
