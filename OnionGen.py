@@ -138,7 +138,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Onion Searcher")
     parser.add_argument("--count", "-c", type = int, default = 100,
         help = "Number of primes to generate")
-    parser.add_argument("--word-lists", "-w", type = str, default = "words",
+    parser.add_argument("--word-lists", "-w", type = str, default = "words,sequences",
         help = "Comma delimited list of wordlists")
     parser.add_argument("--full", "-f", type = bool, default = False,
         help = "Only match full, not just prefix")
