@@ -16,19 +16,15 @@
 #    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 from base64 import b32encode
-from time import time,sleep
 from sys import stdout
-from itertools import combinations
-from multiprocessing import Process,Queue,Event
+from multiprocessing import Process,Queue
+from os import cpu_count
 
 from Crypto.PublicKey import RSA
 from Crypto.PublicKey.pubkey import getStrongPrime
 from Crypto.Util import asn1
 from Crypto.Util.number import inverse
 from Crypto.Hash import SHA
-
-ctr = 0
-start_time = 0
 
 class Search():
     """ Uses a list of words to efficiently iteratively search for a string
@@ -48,7 +44,7 @@ class Search():
     def populate(self, wordlists: list = []):
         """ Populates the lookup table from the wordlist list.
         """
-        print("[-] Populating from wordlists", end = '')
+        print("[-] Populating from wordlists\r", end = '')
         stdout.flush()
         for wordlist in wordlists:
             for word in open(wordlist).read().split('\n'):
@@ -88,27 +84,32 @@ class Search():
                 return False
         return True
 
-def generator(done: Event, primes: Queue, search: Search):
-    while done.is_set():
+def generator(primes: Queue, search: Search, wid: int):
+    """ primes is a queue that feeds us (p,q) tuples. then try a range of e
+    against the p,q pair and generate keys, checking if they have an onion
+    address that we want by using search's match() function. done tells us
+    when the controlling process wants us to stop.
+    """
+    while True:
         p, q = primes.get()
         if p > q:
             (p, q) = (q, p)
-            u = inverse(p, q)
-            n = p * q
-            for e in range(3, 65538, 2):
-                d = inverse(e, (p - 1) * (q - 1))
-                r = RSA.construct((n, e, d, p, q, u))
-                pub = r.publickey()
-                der = asn1.DerSequence()
-                der.append(pub.n)
-                der.append(pub.e)
-                b = der.encode()
-                h = SHA.new(b).digest()[0:10]
-                o = b32encode(h).lower().decode('utf-8')                
-                if search.match(o):
-                    sk = r.exportKey('PEM').decode('utf-8')
-                    print("%s\n%s" % (o, sk))
-                    open(o + ".onion", 'w').write(sk)
+        u = inverse(p, q)
+        n = p * q
+        for e in range(3, 65538, 2):
+            d = inverse(e, (p - 1) * (q - 1))
+            r = RSA.construct((n, e, d, p, q, u))
+            pub = r.publickey()
+            der = asn1.DerSequence()
+            der.append(pub.n)
+            der.append(pub.e)
+            b = der.encode()
+            h = SHA.new(b).digest()[0:10]
+            o = b32encode(h).lower().decode('utf-8')
+            if search.match(o):
+                sk = r.exportKey('PEM').decode('utf-8')
+                print("%s\n%s" % (o, sk))
+                open(o + ".onion", 'w').write(sk)
 
 if __name__ == '__main__':
     import argparse
@@ -119,29 +120,26 @@ if __name__ == '__main__':
         help = "Comma delimited list of wordlists")
     parser.add_argument("--full", "-f", action = "store_true",
         help = "Only match full, not just prefix")
-    parser.add_argument("--processes", "-p", type = int, default = 4,
+    parser.add_argument("--processes", "-p", type = int, default = cpu_count(),
         help = "Number of worker processes")
     args = parser.parse_args()
-    d = Event()
-    d.set()
     q = Queue(args.processes)
     processes = []
     s = Search(wordlists = args.word_lists.split(','), full = args.full)
     for i in range(0, args.processes):
         print("[+] Starting worker {}".format(i+1))
-        processes.append(Process(target = generator, args = (d, q, s)))
+        processes.append(Process(target = generator, args = (q, s, i+1)))
         processes[i].start()
     try:
         while True:
             q.put((getStrongPrime(512, 3, 1e-12),getStrongPrime(512, 3, 1e-12)))
     except KeyboardInterrupt:
-        print("[-] Interrupt received, stopping...")
+        print("[-] Interrupt received, stopping workers.")
         stdout.flush()
-        d.clear()
-        for p in processes:
-            p.terminate()
-        i = args.processes
-        for p in processes:
-            p.join()
-            print("[+] Worker {} stopped.".format(i))
-            i = i-1
+    for p in processes:
+        p.terminate()
+    i = args.processes
+    for p in processes:
+        p.join()
+        print('[+] Stopped worker {}'.format(i))
+        i = i - 1
