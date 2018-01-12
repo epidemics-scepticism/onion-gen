@@ -17,8 +17,9 @@
 
 from base64 import b32encode
 from sys import stdout
-from multiprocessing import Process,Queue
+from multiprocessing import Process,Queue,Value
 from os import cpu_count
+from time import monotonic,sleep
 
 from Crypto.PublicKey import RSA
 from Crypto.PublicKey.pubkey import getStrongPrime
@@ -65,7 +66,7 @@ class Search():
         self.populated = True
         print("[+] Populated from wordlists ")
 
-    def match(self, test):
+    def match(self, test: str):
         """ Checks test against the wordlists, returns True on a match, else
         False.
         """
@@ -84,11 +85,10 @@ class Search():
                 return False
         return True
 
-def generator(primes: Queue, search: Search, wid: int):
+def generator(primes: Queue, search: Search, wid: int, ctr: Value):
     """ primes is a queue that feeds us (p,q) tuples. then try a range of e
     against the p,q pair and generate keys, checking if they have an onion
-    address that we want by using search's match() function. done tells us
-    when the controlling process wants us to stop.
+    address that we want by using search's match() function.
     """
     while True:
         p, q = primes.get()
@@ -106,14 +106,27 @@ def generator(primes: Queue, search: Search, wid: int):
             b = der.encode()
             h = SHA.new(b).digest()[0:10]
             o = b32encode(h).lower().decode('utf-8')
+            with ctr.get_lock():
+                ctr.value += 1
             if search.match(o):
                 sk = r.exportKey('PEM').decode('utf-8')
                 print("%s\n%s" % (o, sk))
                 open(o + ".onion", 'w').write(sk)
 
+def counter(ctr: Value):
+    start_time = monotonic()
+    tmp = 0
+    while True:
+        sleep(30.0)
+        with ctr.get_lock():
+            tmp = ctr.value
+        now = monotonic()
+        delta = int(now - start_time)
+        print('[ ] Generated {} keys in {} seconds ({} per second)'.format(
+            tmp, delta, int(tmp / delta)))
+
 if __name__ == '__main__':
     import argparse
-    from sys import stdout
 
     parser = argparse.ArgumentParser(description="Onion Searcher")
     parser.add_argument("--word-lists", "-w", type = str, default = "words",
@@ -123,13 +136,18 @@ if __name__ == '__main__':
     parser.add_argument("--processes", "-p", type = int, default = cpu_count(),
         help = "Number of worker processes")
     args = parser.parse_args()
+
     q = Queue(args.processes)
     processes = []
     s = Search(wordlists = args.word_lists.split(','), full = args.full)
+    c = Value('i', 0)
+
     for i in range(0, args.processes):
         print("[+] Starting worker {}".format(i+1))
-        processes.append(Process(target = generator, args = (q, s, i+1)))
+        processes.append(Process(target = generator, args = (q, s, i+1, c)))
         processes[i].start()
+    processes.append(Process(target = counter, args = (c,)))
+    processes[-1].start()
     try:
         while True:
             q.put((getStrongPrime(512, 3, 1e-12),getStrongPrime(512, 3, 1e-12)))
@@ -138,8 +156,5 @@ if __name__ == '__main__':
         stdout.flush()
     for p in processes:
         p.terminate()
-    i = args.processes
     for p in processes:
         p.join()
-        print('[+] Stopped worker {}'.format(i))
-        i = i - 1
