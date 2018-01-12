@@ -15,29 +15,40 @@
 #    You should have received a copy of the GNU General Public License
 #    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+from base64 import b32encode
+from time import time,sleep
+from sys import stdout
+from itertools import combinations
+from multiprocessing import Process,Queue,Event
+
 from Crypto.PublicKey import RSA
 from Crypto.PublicKey.pubkey import getStrongPrime
 from Crypto.Util import asn1
 from Crypto.Util.number import inverse
 from Crypto.Hash import SHA
-from base64 import b32encode
-from time import time,sleep
-from sys import stdout
-from itertools import combinations
 
 ctr = 0
 start_time = 0
 
 class Search():
-
-    def __init__(self, wordlists = [], full = False):
+    """ Uses a list of words to efficiently iteratively search for a string
+    which consists purely of words in the list.
+    """
+    def __init__(self, wordlists: list = [], full: bool = True):
+        """ wordlists is a list of file paths, to files containing new-line
+        separated words.
+        full is a boolean flag to determine if a prefix or a full match is
+        required.
+        """
         self.root = {}
         self.charset = set("abcdefghijklmnopqrstuvwxyz234567")
         self.full = full
         self.populate(wordlists)
 
-    def populate(self, wordlists = []):
-        print("[-] Populating from wordlists\r", end = '')
+    def populate(self, wordlists: list = []):
+        """ Populates the lookup table from the wordlist list.
+        """
+        print("[-] Populating from wordlists", end = '')
         stdout.flush()
         for wordlist in wordlists:
             for word in open(wordlist).read().split('\n'):
@@ -59,6 +70,11 @@ class Search():
         print("[+] Populated from wordlists ")
 
     def match(self, test):
+        """ Checks test against the wordlists, returns True on a match, else
+        False.
+        """
+        if self.populated != True:
+            return False
         tree = self.root
         for i in range(0, len(test)):
             if test[i] in tree:
@@ -72,88 +88,60 @@ class Search():
                 return False
         return True
 
-class Generator():
-
-    def __init__(self, count = 500, wordlists = [], die = None, auto_start = False, full = False):
-        self.die = die
-        self.primes = []
-        self.onions = {}
-        self.count = count
-        self.searcher = Search(wordlists, full)
-        self.spinner = ['|','/','-','\\']
-        if auto_start:
-            while die.is_set():
-                self.populate_primes()
-                self.search()
-
-    def populate_primes(self):
-        self.primes = []
-        print("[-] Generating %d primes\r" % self.count, end = '')
-        stdout.flush()
-        for _ in range(0,self.count):
-            self.primes.append(getStrongPrime(512, 3, 1e-12))
-        print("[+] Generated %d primes \r" % self.count)
-
-    def onion(self,pub):
-        der = asn1.DerSequence()
-        der.append(pub.n)
-        der.append(pub.e)
-        b = der.encode()
-        h = SHA.new(b).digest()[0:10]
-        return b32encode(h).lower().decode('utf-8')
-
-    def gen_key(self,p,q,e):
+def generator(done: Event, primes: Queue, search: Search):
+    while done.is_set():
+        p, q = primes.get()
         if p > q:
-            (p, q)=(q, p)
-        u = inverse(p,q)
-        n = p*q
-        d = inverse(e, (p-1) * (q-1))
-        return RSA.construct((n, e, d, p, q, u))
-
-
-    def search(self):
-        global start_time
-        global ctr
-        if start_time == 0:
-            start_time = time()
-        for p,q in combinations(self.primes, 2):
+            (p, q) = (q, p)
+            u = inverse(p, q)
+            n = p * q
             for e in range(3, 65538, 2):
-                if not self.die.is_set():
-                    return
-                k = self.gen_key(p, q, e)
-                o = self.onion(k.publickey())
-                if self.searcher.match(o) is True:
-                    pk = k.exportKey('PEM').decode('utf-8')
-                    print("%s\n%s" % (o, pk))
-                    open(o + ".onion", 'w').write(pk)
-                ctr = ctr + 1
-                print("[%s]\r" % self.spinner[ctr % len(self.spinner)], end = '')
-                stdout.flush()
+                d = inverse(e, (p - 1) * (q - 1))
+                r = RSA.construct((n, e, d, p, q, u))
+                pub = r.publickey()
+                der = asn1.DerSequence()
+                der.append(pub.n)
+                der.append(pub.e)
+                b = der.encode()
+                h = SHA.new(b).digest()[0:10]
+                o = b32encode(h).lower().decode('utf-8')                
+                if search.match(o):
+                    sk = r.exportKey('PEM').decode('utf-8')
+                    print("%s\n%s" % (o, sk))
+                    open(o + ".onion", 'w').write(sk)
 
 if __name__ == '__main__':
-    import argparse,threading
+    import argparse
     from sys import stdout
-    die = threading.Event()
-    die.set()
+
     parser = argparse.ArgumentParser(description="Onion Searcher")
-    parser.add_argument("--count", "-c", type = int, default = 100,
-        help = "Number of primes to generate")
-    parser.add_argument("--word-lists", "-w", type = str, default = "words,sequences",
+    parser.add_argument("--word-lists", "-w", type = str, default = "words",
         help = "Comma delimited list of wordlists")
     parser.add_argument("--full", "-f", action = "store_true",
         help = "Only match full, not just prefix")
+    parser.add_argument("--processes", "-p", type = int, default = 4,
+        help = "Number of worker processes")
     args = parser.parse_args()
-    t = threading.Thread(target = Generator, args = (args.count, args.word_lists.split(','), die, True, args.full))
-    t.start()
+    d = Event()
+    d.set()
+    q = Queue(args.processes)
+    processes = []
+    s = Search(wordlists = args.word_lists.split(','), full = args.full)
+    for i in range(0, args.processes):
+        print("[+] Starting worker {}".format(i+1))
+        processes.append(Process(target = generator, args = (d, q, s)))
+        processes[i].start()
     try:
         while True:
-            sleep(30.0)
-            if start_time > 0:
-                elapsed = time() - start_time
-                print("%d keys in %d seconds\t(%d k/s)" % (ctr, elapsed, ctr / elapsed))
+            q.put((getStrongPrime(512, 3, 1e-12),getStrongPrime(512, 3, 1e-12)))
     except KeyboardInterrupt:
-        print("[-] Interrupt received, stopping...\r", end = '')
+        print("[-] Interrupt received, stopping...")
         stdout.flush()
-        die.clear()
-        t.join()
-        print("[+] Interrupt received, stopped... ")
+        d.clear()
+        for p in processes:
+            p.terminate()
+        i = args.processes
+        for p in processes:
+            p.join()
+            print("[+] Worker {} stopped.".format(i))
+            i = i-1
